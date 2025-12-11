@@ -321,21 +321,6 @@ DEFAULT_MODELS = [
         input_price=0.0,
         output_price=0.0,
     ),
-    # Common local models
-    ModelConfig(
-        name="codestral:latest",
-        provider="ollama",
-        alias="ollama-codestral",
-        input_price=0.0,
-        output_price=0.0,
-    ),
-    ModelConfig(
-        name="qwen2.5-coder:latest",
-        provider="ollama",
-        alias="ollama-qwen-coder",
-        input_price=0.0,
-        output_price=0.0,
-    ),
 ]
 
 
