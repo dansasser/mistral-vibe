@@ -38,7 +38,9 @@ from vibe.core.tools.manager import ToolManager
 from vibe.core.types import (
     AgentStats,
     ApprovalCallback,
+    ApprovalResponse,
     AssistantEvent,
+    AsyncApprovalCallback,
     BaseEvent,
     CompactEndEvent,
     CompactStartEvent,
@@ -53,7 +55,6 @@ from vibe.core.types import (
 from vibe.core.utils import (
     TOOL_ERROR_TAG,
     VIBE_STOP_EVENT_TAG,
-    ApprovalResponse,
     CancellationReason,
     get_user_agent,
     get_user_cancellation_message,
@@ -188,11 +189,6 @@ class Agent:
             case MiddlewareAction.STOP:
                 yield AssistantEvent(
                     content=f"<{VIBE_STOP_EVENT_TAG}>{result.reason}</{VIBE_STOP_EVENT_TAG}>",
-                    prompt_tokens=0,
-                    completion_tokens=0,
-                    session_total_tokens=self.stats.session_total_llm_tokens,
-                    last_turn_duration=0,
-                    tokens_per_second=0,
                     stopped_by_middleware=True,
                 )
                 await self.interaction_logger.save_interaction(
@@ -337,16 +333,7 @@ class Agent:
     def _create_assistant_event(
         self, content: str, chunk: LLMChunk | None
     ) -> AssistantEvent:
-        return AssistantEvent(
-            content=content,
-            prompt_tokens=chunk.usage.prompt_tokens if chunk and chunk.usage else 0,
-            completion_tokens=chunk.usage.completion_tokens
-            if chunk and chunk.usage
-            else 0,
-            session_total_tokens=self.stats.session_total_llm_tokens,
-            last_turn_duration=self.stats.last_turn_duration,
-            tokens_per_second=self.stats.tokens_per_second,
-        )
+        return AssistantEvent(content=content)
 
     async def _stream_assistant_events(self) -> AsyncGenerator[AssistantEvent]:
         chunks: list[LLMChunk] = []
@@ -421,14 +408,7 @@ class Agent:
         assistant_msg = llm_result.message
         self.messages.append(assistant_msg)
 
-        return AssistantEvent(
-            content=assistant_msg.content or "",
-            prompt_tokens=llm_result.usage.prompt_tokens,
-            completion_tokens=llm_result.usage.completion_tokens,
-            session_total_tokens=self.stats.session_total_llm_tokens,
-            last_turn_duration=self.stats.last_turn_duration,
-            tokens_per_second=self.stats.tokens_per_second,
-        )
+        return AssistantEvent(content=assistant_msg.content or "")
 
     async def _handle_tool_calls(  # noqa: PLR0915
         self, resolved: ResolvedMessage
@@ -625,7 +605,7 @@ class Agent:
                     tools=available_tools,
                     tool_choice=tool_choice,
                     extra_headers={
-                        "User-Agent": get_user_agent(),
+                        "user-agent": get_user_agent(provider.backend),
                         "x-affinity": self.session_id,
                     },
                     max_tokens=max_tokens,
@@ -682,7 +662,7 @@ class Agent:
                     tools=available_tools,
                     tool_choice=tool_choice,
                     extra_headers={
-                        "User-Agent": get_user_agent(),
+                        "user-agent": get_user_agent(provider.backend),
                         "x-affinity": self.session_id,
                     },
                     max_tokens=max_tokens,
@@ -761,24 +741,18 @@ class Agent:
                 feedback="Tool execution not permitted.",
             )
         if asyncio.iscoroutinefunction(self.approval_callback):
-            response, feedback = await self.approval_callback(
-                tool_name, args, tool_call_id
-            )
+            async_callback = cast(AsyncApprovalCallback, self.approval_callback)
+            response, feedback = await async_callback(tool_name, args, tool_call_id)
         else:
             sync_callback = cast(SyncApprovalCallback, self.approval_callback)
             response, feedback = sync_callback(tool_name, args, tool_call_id)
 
         match response:
-            case ApprovalResponse.ALWAYS:
-                self.auto_approve = True
-                return ToolDecision(
-                    verdict=ToolExecutionResponse.EXECUTE, feedback=feedback
-                )
             case ApprovalResponse.YES:
                 return ToolDecision(
                     verdict=ToolExecutionResponse.EXECUTE, feedback=feedback
                 )
-            case _:
+            case ApprovalResponse.NO:
                 return ToolDecision(
                     verdict=ToolExecutionResponse.SKIP, feedback=feedback
                 )
@@ -903,6 +877,7 @@ class Agent:
             self.messages = [system_message, summary_message]
 
             active_model = self.config.get_active_model()
+            provider = self.config.get_provider_for_model(active_model)
 
             async with self.backend as backend:
                 actual_context_tokens = await backend.count_tokens(
@@ -911,7 +886,7 @@ class Agent:
                     tools=self.format_handler.get_available_tools(
                         self.tool_manager, self.config
                     ),
-                    extra_headers={"User-Agent": get_user_agent()},
+                    extra_headers={"user-agent": get_user_agent(provider.backend)},
                 )
 
             self.stats.context_tokens = actual_context_tokens
